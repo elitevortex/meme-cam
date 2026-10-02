@@ -1,7 +1,7 @@
 """Meme cam: do a pose in front of your webcam and a GIF plays over your face.
 
 Run:   .venv/bin/python meme_cam.py
-Keys:  q = quit, d = toggle debug numbers, c = recalibrate your straight face
+Keys:  q = quit, l = toggle tracking lines, d = toggle debug numbers, c = recalibrate your straight face
 
 Left and right are YOUR left and right. The picture is mirrored, so your left
 side is on the left of the screen.
@@ -192,6 +192,61 @@ def detect_pose(face, blend, hands, body, baseline):
 
 
 # ---------------------------------------------------------------------------
+# Tracking overlay: what the models see, plus the zones that trigger each pose.
+# Zones are dim yellow normally and turn red when you're triggering them.
+# ---------------------------------------------------------------------------
+EYES_AND_LIPS = (vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYE
+                 + vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE
+                 + vision.FaceLandmarksConnections.FACE_LANDMARKS_LIPS)
+HAND_LINES = vision.HandLandmarksConnections.HAND_CONNECTIONS
+BODY_LINES = [c for c in vision.PoseLandmarksConnections.POSE_LANDMARKS if c.start >= 11 and c.end >= 11]
+
+IDLE, HOT = (0, 200, 255), (0, 0, 255)
+
+
+def draw_overlay(frame, face, hands, body, pose):
+    H, W = frame.shape[:2]
+
+    def px(p):
+        return int(p.x * W), int(p.y * H)
+
+    def lines(points, connections, colour, thickness):
+        for c in connections:
+            cv2.line(frame, px(points[c.start]), px(points[c.end]), colour, thickness, cv2.LINE_AA)
+
+    if body:
+        lines(body, BODY_LINES, (0, 165, 255), 2)
+    for hand in hands:
+        lines(hand, HAND_LINES, (0, 255, 0), 2)
+        for p in hand:
+            cv2.circle(frame, px(p), 3, (255, 255, 255), -1, cv2.LINE_AA)
+
+    def zone(name):
+        return (HOT, 3) if pose == name else (IDLE, 1)
+
+    # Broccoli: your left hand has to get above this line, on the left half of your body
+    if body:
+        left_sh, right_sh = sorted((body[11], body[12]), key=lambda p: p.x)
+        y, x_mid = int((left_sh.y - ARM_RAISE) * H), int((left_sh.x + right_sh.x) / 2 * W)
+        colour, t = zone("broccoli")
+        cv2.line(frame, (0, y), (x_mid, y), colour, t, cv2.LINE_AA)
+        cv2.putText(frame, "broccoli", (10, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
+
+    geo = face_geometry(face, body)
+    if geo:
+        _, nose, chin_y, _ = geo
+        # Hold on: a right fist above this line
+        colour, t = zone("hold_on")
+        cv2.line(frame, (int(nose.x * W), int(chin_y * H)), (W, int(chin_y * H)), colour, t, cv2.LINE_AA)
+        cv2.putText(frame, "hold on", (W - 110, int(chin_y * H) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
+
+    if face:
+        # Speed: eyes and lips light up
+        if pose == "speed":
+            lines(face, EYES_AND_LIPS, HOT, 2)
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
@@ -223,6 +278,7 @@ def main():
     active, candidate, streak, last_seen = None, None, 0, 0.0
     face_box = None  # (cx, cy, width) in pixels, remembered so the GIF stays put if the face is lost
     debug = False
+    show_lines = True
     t0, ts = time.monotonic(), -1
     calib_samples, calib_until = [], time.time() + CALIBRATION_SECONDS
     baseline = {"eyes": 0.0, "pucker": 0.0}
@@ -281,6 +337,9 @@ def main():
         elif active and now - last_seen > RELEASE_SECONDS:
             active = None
 
+        if show_lines:
+            draw_overlay(frame, face, hand_res.hand_landmarks, body, pose)
+
         if active and face_box:
             cx, cy, _ = face_box
             paste(frame, gifs[active].current_frame(), cx, cy, int(W * GIF_SIZE))
@@ -298,6 +357,8 @@ def main():
             break
         if key == ord("d"):
             debug = not debug
+        if key == ord("l"):
+            show_lines = not show_lines
         if key == ord("c"):
             calib_samples, calib_until = [], time.time() + CALIBRATION_SECONDS
 
