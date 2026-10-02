@@ -1,7 +1,7 @@
 """Meme cam: do a pose in front of your webcam and a GIF plays over your face.
 
 Run:   .venv/bin/python meme_cam.py
-Keys:  q = quit, d = toggle debug numbers
+Keys:  q = quit, d = toggle debug numbers, c = recalibrate your straight face
 
 Left and right are YOUR left and right. The picture is mirrored, so your left
 side is on the left of the screen.
@@ -23,8 +23,9 @@ HERE = Path(__file__).parent
 # Settings you'll probably want to tweak. Turn on debug (press d) to see the
 # live values, then nudge these up or down until the poses trigger reliably.
 # ---------------------------------------------------------------------------
-EYES_SHUT = 0.5          # speed: how closed/squeezed both eyes must be (0-1)
-LIPS_PUCKER = 0.3        # speed: how pushed-out your lips must be (0-1)
+CALIBRATION_SECONDS = 2  # at startup, keep a straight face this long so it learns your neutral face
+EYES_SHUT = 0.15         # speed: how much MORE closed your eyes must be than your straight face
+LIPS_PUCKER = 0.12       # speed: how much MORE pushed-out your lips must be than your straight face
 HEAD_TURN = 0.2          # dog/cat: how far your nose is off-centre (0 = facing camera)
 ARM_RAISE = 0.03         # broccoli: how far above your left shoulder your left hand must be
 MOUTH_REACH = 0.45       # durag: how close a hand must be to your mouth, in face widths
@@ -145,7 +146,7 @@ def lips_score(blend):
     return max(blend["mouthPucker"], blend["mouthFunnel"])
 
 
-def detect_pose(face, blend, hands, body):
+def detect_pose(face, blend, hands, body, baseline):
     """Return the name of the first matching pose, or None. Also returns debug values."""
     info = {}
     if body and hand_over_left_shoulder(body, hands):
@@ -171,9 +172,9 @@ def detect_pose(face, blend, hands, body):
     if not face:
         return None, info
 
-    # Face poses
-    eyes = eyes_score(blend)
-    pucker = lips_score(blend)
+    # Face poses, measured against your calibrated straight face
+    eyes = eyes_score(blend) - baseline["eyes"]
+    pucker = lips_score(blend) - baseline["pucker"]
     cheeks = sorted((face[234], face[454]), key=lambda p: p.x)
     turn = (face[1].x - cheeks[0].x) / max(cheeks[1].x - cheeks[0].x, 1e-6) - 0.5
     info.update(eyes=eyes, pucker=pucker, turn=turn)
@@ -220,6 +221,8 @@ def main():
     face_box = None  # (cx, cy, width) in pixels, remembered so the GIF stays put if the face is lost
     debug = False
     t0, ts = time.monotonic(), -1
+    calib_samples, calib_until = [], time.time() + CALIBRATION_SECONDS
+    baseline = {"eyes": 0.0, "pucker": 0.0}
 
     while True:
         ok, frame = cam.read()
@@ -244,7 +247,19 @@ def main():
                         int((max(xs) - min(xs)) * W))
 
         now = time.time()
-        pose, info = detect_pose(face, blend, hand_res.hand_landmarks, body)
+        if now < calib_until:
+            # Learn what your straight face looks like before triggering anything
+            if blend:
+                calib_samples.append((eyes_score(blend), lips_score(blend)))
+            cv2.putText(frame, "Calibrating: keep a straight face", (10, H - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+            pose, info = None, {}
+        else:
+            if calib_samples:
+                baseline = {"eyes": float(np.mean([s[0] for s in calib_samples])),
+                            "pucker": float(np.mean([s[1] for s in calib_samples]))}
+                calib_samples = []
+            pose, info = detect_pose(face, blend, hand_res.hand_landmarks, body, baseline)
 
         # Only switch once a pose has been held a few frames, and hang on briefly after it ends
         streak = streak + 1 if pose and pose == candidate else 1
@@ -263,7 +278,8 @@ def main():
             paste(frame, gifs[active].current_frame(), cx, cy, int(W * GIF_SIZE))
 
         if debug:
-            lines = [f"pose: {pose}  showing: {active}"] + [
+            lines = [f"pose: {pose}  showing: {active}",
+                     f"straight face: eyes {baseline['eyes']:.2f} pucker {baseline['pucker']:.2f}"] + [
                 f"{k}: {v:.2f}" if isinstance(v, float) else f"{k}: {v}" for k, v in info.items()]
             for i, line in enumerate(lines):
                 cv2.putText(frame, line, (10, 30 + i * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -274,6 +290,8 @@ def main():
             break
         if key == ord("d"):
             debug = not debug
+        if key == ord("c"):
+            calib_samples, calib_until = [], time.time() + CALIBRATION_SECONDS
 
     cam.release()
     cv2.destroyAllWindows()
