@@ -32,6 +32,8 @@ MOUTH_REACH = 0.45       # durag: how close a hand must be to your mouth, in fac
 HOLD_FRAMES = 4          # a pose must be seen this many frames in a row to start
 RELEASE_SECONDS = 0.4    # keep the GIF up this long after you drop the pose
 GIF_SIZE = 0.5           # GIF width as a fraction of the camera width (0.5 = half the camera)
+FLIPPED = {"hold_on"}    # GIFs to mirror, so the meme matches your side
+PLAY_FULL = {"broccoli"}  # GIFs that play to the end once triggered, even if you drop the pose
 
 # Pose name -> GIF file. Order matters: the first pose that matches wins.
 POSES = {
@@ -48,12 +50,13 @@ POSES = {
 # GIF playback
 # ---------------------------------------------------------------------------
 class Gif:
-    def __init__(self, path):
+    def __init__(self, path, flip=False):
         img = Image.open(path)
         self.frames, self.durations = [], []
         for frame in ImageSequence.Iterator(img):
             rgba = np.array(frame.convert("RGBA"))
-            self.frames.append(cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+            bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+            self.frames.append(cv2.flip(bgra, 1) if flip else bgra)
             self.durations.append(max(frame.info.get("duration", 80), 20) / 1000)
         self.total = sum(self.durations)
         self.start = time.time()
@@ -192,7 +195,7 @@ def detect_pose(face, blend, hands, body, baseline):
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
-    gifs = {name: Gif(HERE / "gifs" / file) for name, file in POSES.items()}
+    gifs = {name: Gif(HERE / "gifs" / file, flip=name in FLIPPED) for name, file in POSES.items()}
 
     def model(name):
         return BaseOptions(model_asset_path=str(HERE / "models" / name))
@@ -264,7 +267,12 @@ def main():
         # Only switch once a pose has been held a few frames, and hang on briefly after it ends
         streak = streak + 1 if pose and pose == candidate else 1
         candidate = pose
-        if pose and streak >= HOLD_FRAMES:
+        # GIFs in PLAY_FULL play all the way through once started, even if you drop the pose
+        locked = active in PLAY_FULL and now - gifs[active].start < gifs[active].total
+        if locked:
+            if pose == active:
+                last_seen = now
+        elif pose and streak >= HOLD_FRAMES:
             if pose != active:
                 gifs[pose].restart()
             active, last_seen = pose, now
